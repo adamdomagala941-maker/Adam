@@ -1,0 +1,3 @@
+label_logo.png and current_ghs.png: extracted unchanged from user-provided DJCHEM_wzor_2x76x51_QR.docm.
+GHS01.svg–GHS09.svg: @ghs-hazard-pictograms/assets 2.0.0, MIT; https://github.com/karlnorling/ghs-hazard-pictograms. Archive verified against registry SHA-512 integrity.
+Liberation Serif: metric-compatible Times New Roman fallback, SIL Open Font License; see FONT-LICENSE.txt. Local Times New Roman is preferred when present.
