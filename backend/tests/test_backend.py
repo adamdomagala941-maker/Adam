@@ -207,7 +207,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("lokalne", response.json()["detail"])
 
     def test_blocked_search_does_not_pretend_no_results(self):
-        with patch("backend.search.fetch_document", side_effect=RetrievalError("Denied")):
+        with patch("backend.search._ddgs_search", side_effect=RetrievalError("Denied")), patch("backend.search.fetch_document", side_effect=RetrievalError("Denied")):
             response = self.client.get("/api/search", params={"q": "aceton"})
         self.assertEqual(response.status_code, 503)
         self.assertIn("niedostępne", response.json()["detail"])

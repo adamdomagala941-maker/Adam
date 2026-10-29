@@ -3,6 +3,7 @@ from pathlib import Path
 import http.client
 import os
 import subprocess
+import socket
 import sys
 import threading
 import time
@@ -36,6 +37,11 @@ def main():
     if '--serve' in sys.argv:
         import uvicorn
         port = int(os.environ.get('PORT', '8000'))
+        try:
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', port))
+        except OSError:
+            raise SystemExit(f'Port {port} jest zajety. Zamknij poprzednie okno DJCHEM (Ctrl+C) i uruchom nowa wersje ponownie. Mozesz tez wybrac inny port zmienna PORT.')
         threading.Thread(target=open_when_ready, args=(port,), daemon=True).start()
         print('DJCHEM: pozostaw to okno otwarte. Ctrl+C zatrzymuje program.', flush=True)
         uvicorn.run('backend.app:app', host='127.0.0.1', port=port)

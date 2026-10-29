@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { ArrowDownToLine, ArrowRight, Check, CheckCheck, ChevronDown, ExternalLink, FileCheck2, FileText, FlaskConical, Info, LoaderCircle, Minus, Plus, Printer, QrCode, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Upload, X } from 'lucide-react';
 import Label, { type LabelData } from './components/Label';
+import SearchSettings, { type SearchConfiguration } from './components/SearchSettings';
 
-type Source = {title:string;url:string;method:string;excerpt:string};
+type Source = {title:string;url:string;method:string;excerpt:string;searchProvider?:string};
 type SearchResult = {title:string;url:string;provider:string};
 type Extraction = {data:LabelData;source:Source;warnings:string[];missing:string[]};
 const example: LabelData = {
@@ -37,21 +38,26 @@ export default function App(){
   const [fit,setFit]=useState({overflow:false,minFont:5});const [zoom,setZoom]=useState(defaultZoom);
   const [help,setHelp]=useState(false);const [persisted,setPersisted]=useState(true);
   const [exporting,setExporting]=useState(false);
+  const [settingsOpen,setSettingsOpen]=useState(false);
+  const [searchConfig,setSearchConfig]=useState<SearchConfiguration>({ai_enabled:false,key_configured:false,key_source:''});
+  const [attempts,setAttempts]=useState<{title:string;message:string}[]>([]);
   const fileInput=useRef<HTMLInputElement>(null);const controller=useRef<AbortController|null>(null);
   useEffect(()=>{try{localStorage.setItem(storageKey,JSON.stringify({data,source}));setPersisted(true);}catch{setPersisted(false);}},[data,source]);
   useEffect(()=>{let active=true;setQr('');setQrError('');if(data.catalogNumber.trim()) QRCode.toDataURL(data.catalogNumber,{width:600,margin:4,errorCorrectionLevel:'M'}).then(value=>{if(active)setQr(value);}).catch(()=>{if(active)setQrError('Numer jest za długi, aby utworzyć kod QR.');});return()=>{active=false;};},[data.catalogNumber]);
   useEffect(()=>()=>controller.current?.abort(),[]);
+  useEffect(()=>{let active=true;fetch('/api/settings').then(r=>r.ok?r.json():null).then(s=>{if(active&&s)setSearchConfig(s);}).catch(()=>{});return()=>{active=false;};},[]);
   useEffect(()=>{const resize=()=>setZoom(defaultZoom());window.addEventListener('resize',resize);return()=>window.removeEventListener('resize',resize);},[]);
   const update=<K extends keyof LabelData>(key:K,value:LabelData[K])=>{setData(d=>({...d,[key]:value}));setVerified(false);};
   const apply=(result:Extraction)=>{setData(old=>({...empty,...result.data,volume:old.volume,catalogNumber:old.catalogNumber}));setSource(result.source);setWarnings([...result.warnings,...(result.missing.length?[`Pola do uzupełnienia lub sprawdzenia: ${result.missing.join(', ')}.`]:[])]);setVerified(false);};
   const run=async(action:(signal:AbortSignal)=>Promise<void>)=>{controller.current?.abort();const c=new AbortController();controller.current=c;setError('');setWarnings([]);try{await action(c.signal);}catch(e){if((e as Error).name!=='AbortError')setError((e as Error).message||'Nie udało się wykonać operacji.');}finally{if(controller.current===c){setBusy('');controller.current=null;}}};
-  const extract=(candidate:SearchResult)=>run(async signal=>{setBusy('Odczytywanie karty charakterystyki…');const r=await request<Extraction>('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:candidate.url,expected_name:query}),signal});apply(r);});
+  const extract=(candidate:SearchResult)=>run(async signal=>{setBusy('Odczytywanie karty i linków do PDF…');const r=await request<Extraction>('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:candidate.url,expected_name:query}),signal});apply({...r,source:{...r.source,searchProvider:candidate.provider}});});
   const search=()=>run(async signal=>{
-    if(!query.trim())return;setBusy('Wyszukiwanie kart charakterystyki…');setResults([]);
+    if(!query.trim())return;setBusy(searchConfig.ai_enabled?'AI wyszukuje źródłowe karty charakterystyki…':'Wyszukiwanie kart w wielu wyszukiwarkach…');setResults([]);setAttempts([]);
     const found=await request<{results:SearchResult[];warnings:string[]}>('/api/search?q='+encodeURIComponent(query.trim()),{signal});setResults(found.results);setWarnings(found.warnings);
     if(!found.results.length) {setError('Nie znaleziono karty. Doprecyzuj nazwę i producenta lub zaimportuj PDF.');return;}
-    let lastError='';for(const candidate of found.results.slice(0,3)) {try{setBusy('Odczytywanie: '+candidate.title);const r=await request<Extraction>('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:candidate.url,expected_name:query}),signal});apply({...r,warnings:[...found.warnings,...r.warnings]});return;}catch(e){if((e as Error).name==='AbortError')throw e;lastError=(e as Error).message;}}
-    throw new Error('Znaleziono źródła, ale nie udało się odczytać karty. Wybierz inne źródło lub zaimportuj PDF. '+lastError);
+    const failed:{title:string;message:string}[]=[];
+    for(const [i,candidate] of found.results.slice(0,6).entries()) {try{setBusy(`Odczyt źródła ${i+1}/${Math.min(found.results.length,6)} i linków PDF: ${candidate.title}`);const r=await request<Extraction>('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:candidate.url,expected_name:query}),signal});apply({...r,source:{...r.source,searchProvider:candidate.provider},warnings:[...found.warnings,...r.warnings]});return;}catch(e){if((e as Error).name==='AbortError')throw e;failed.push({title:candidate.title,message:(e as Error).message});setAttempts([...failed]);}}
+    throw new Error('Znaleziono źródła, ale odczyt kart się nie powiódł. Poniżej znajdziesz przyczyny dla każdego źródła. Możesz wybrać inne źródło'+(!searchConfig.ai_enabled?' lub włączyć wyszukiwanie AI w ustawieniach.':'.'));
   });
   const upload=(file:File)=>run(async signal=>{setBusy('Odczytywanie pliku PDF…');const form=new FormData();form.append('file',file);apply(await request<Extraction>('/api/upload',{method:'POST',body:form,signal}));});
   const canPrint=!!data.name.trim()&&!!qr&&verified&&!fit.overflow&&!busy&&!exporting;
@@ -73,7 +79,7 @@ export default function App(){
   return <>
     <header className="topbar no-print"><a className="brand" href="/" aria-label="DJCHEM studio etykiet"><FlaskConical size={24}/><span>DJCHEM<span className="brand-dot">.</span></span><span className="brand-divider"/><span className="brand-sub">studio etykiet</span></a><div className="header-actions"><span className="session-state"><span/> {persisted?'Szkic zapisany lokalnie':'Zapis lokalny niedostępny'}</span><button className="button ghost help-trigger" onClick={()=>setHelp(true)}><Info size={16}/> Jak to działa</button></div></header>
     <main className="workspace">
-      <section className="page-heading no-print"><div><div className="eyebrow">OD KARTY CHARAKTERYSTYKI DO ETYKIETY</div><h1>Twoja etykieta. Gotowa do druku.</h1><p>Wyszukaj substancję, sprawdź dane i wydrukuj w formacie DJCHEM.</p></div><div className="format-badge"><span className="format-icon"><FileText size={21}/></span><div><strong>76 × 51 mm</strong><span>2 etykiety · wzór DJCHEM</span></div></div></section>
+      <section className="page-heading no-print"><div><div className="eyebrow">OD KARTY CHARAKTERYSTYKI DO ETYKIETY</div><h1>Twoja etykieta. Gotowa do druku.</h1><p>Wyszukaj substancję, sprawdź dane i wydrukuj w formacie DJCHEM. <span className="app-version">v1.1</span></p></div><div className="format-badge"><span className="format-icon"><FileText size={21}/></span><div><strong>76 × 51 mm</strong><span>2 etykiety · wzór DJCHEM</span></div></div></section>
       <div className="studio-grid">
         <div className="editor-column no-print">
           <section className="panel search-panel"><div className="section-title"><span className="step">01</span><h2>Znajdź substancję</h2><span className="mini-label">ŹRÓDŁO DANYCH</span></div>
@@ -82,10 +88,12 @@ export default function App(){
               <label htmlFor="search-input">{mode==='search'?'Nazwa substancji lub produktu':'Adres URL karty charakterystyki'}</label>
               <div className="search-row"><div className="input-icon"><Search size={17}/><input id="search-input" type={mode==='search'?'text':'url'} value={mode==='search'?query:url} onChange={e=>mode==='search'?setQuery(e.target.value):setUrl(e.target.value)} placeholder={mode==='search'?'np. aceton Chempur, etanol 96%':'https://producent.pl/karta.pdf'} required disabled={!!busy}/></div><button className="button primary" disabled={!!busy} type="submit">{busy?<LoaderCircle size={17} className="spin"/>:<ArrowRight size={18}/>}<span>Szukaj</span></button></div>
             </form>
+            <div className="search-options"><span className="search-engine-status"><span className="status-dot"/>{searchConfig.ai_enabled?'AI + wyszukiwanie standardowe':'Wyszukiwanie standardowe · wiele źródeł'}</span><button className="text-button" onClick={()=>setSettingsOpen(true)}><SlidersHorizontal size={13}/> Wyszukiwanie i AI</button></div>
             <div className="upload-row"><span>Masz już kartę charakterystyki?</span><button className="text-button" onClick={()=>fileInput.current?.click()} disabled={!!busy}><Upload size={14}/> Importuj PDF</button><input ref={fileInput} type="file" accept="application/pdf,.pdf" className="hidden" aria-label="Importuj kartę charakterystyki PDF" onChange={e=>{const f=e.target.files?.[0];if(f)void upload(f);e.target.value='';}}/></div>
             {busy&&<div className="busy-message" role="status"><LoaderCircle className="spin" size={16}/><span>{busy}</span><button onClick={()=>controller.current?.abort()} aria-label="Anuluj"><X size={16}/></button></div>}
             {error&&<div className="message error" role="alert"><Info size={17}/><div>{error}</div></div>}
-            {results.length>0&&<details className="results" open={!source||!!error}><summary>Znalezione źródła ({results.length}) <ChevronDown size={14}/></summary>{results.map((r,i)=><button key={r.url+i} className="result-item" disabled={!!busy} onClick={()=>void extract(r)}><FileText size={17}/><span><strong>{r.title}</strong><small>{new URL(r.url).hostname}</small></span><ArrowRight size={15}/></button>)}</details>}
+            {error&&attempts.length>0&&<details className="search-attempts"><summary>Szczegóły odczytu ({attempts.length})</summary><ol>{attempts.map((a,i)=><li key={i}><strong>{a.title}</strong>: {a.message}</li>)}</ol></details>}
+            {results.length>0&&<details className="results" open={!source||!!error}><summary>Znalezione źródła ({results.length}) <ChevronDown size={14}/></summary>{results.map((r,i)=><button key={r.url+i} className="result-item" disabled={!!busy} onClick={()=>void extract(r)}><FileText size={17}/><span><strong>{r.title}</strong><small>{new URL(r.url).hostname}</small><small className="provider-name">{r.provider}</small></span><ArrowRight size={15}/></button>)}</details>}
             {source&&<div className={'source-card '+(source.method==='template'?'template-source':'')}><FileCheck2 size={20}/><div><strong>{source.method==='template'?'Podgląd na danych z Twojego wzoru':'Dane odczytane z dokumentu'}</strong><span>{source.title}</span>{source.url&&<a href={source.url} target="_blank" rel="noreferrer">Otwórz dokument źródłowy <ExternalLink size={11}/></a>}{source.excerpt&&<details><summary>Fragment źródłowy</summary><pre>{source.excerpt}</pre></details>}</div></div>}
           </section>
 
@@ -120,6 +128,7 @@ export default function App(){
       </div>
       <footer className="page-footer no-print"><span>DJCHEM <b>studio etykiet</b></span><span>Twój wzór. Precyzyjny druk.</span></footer>
     </main>
+    {settingsOpen&&<SearchSettings onClose={()=>setSettingsOpen(false)} onSaved={setSearchConfig}/>}
     {help&&<div className="modal-backdrop no-print" onClick={()=>setHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><button className="modal-close" aria-label="Zamknij" onClick={()=>setHelp(false)}><X size={20}/></button><div className="eyebrow">KRÓTKA INSTRUKCJA</div><h2 id="help-title">Od nazwy do gotowej etykiety</h2><ol><li>Wpisz nazwę, stężenie i producenta. Program wyszuka kartę i spróbuje odczytać pierwsze dostępne źródło. Możesz wybrać inne, wkleić URL lub wgrać PDF.</li><li>Porównaj pola i piktogramy z sekcją 2.2 aktualnej karty. Skanowane PDF bez warstwy tekstowej wymagają ręcznego uzupełnienia. Niewykryte dane pozostają puste.</li><li>Wpisz pojemność oraz numer katalogowy. QR koduje sam numer, bez linku.</li><li>Potwierdź sprawdzenie danych i wybierz druk lub zapis PDF. Ustaw papier 76 × 51 mm, skalę 100%, bez marginesów, nagłówków i stopek.</li></ol><p>Etykieta ma dwie osobne strony jak w pliku wzorcowym. Font dopasowuje się do dostępnego miejsca; przepełnienie blokuje druk. Podgląd używa Times New Roman lub dołączonego Liberation Serif.</p><p>Ostatni szkic jest przechowywany tylko w tej przeglądarce. Przycisk z ikoną dokumentu pobiera kopię JSON. Importowane PDF są przetwarzane przez serwer bez trwałego zapisu.</p><button className="button primary" onClick={()=>setHelp(false)}>Rozumiem <Check size={16}/></button></section></div>}
   </>;
 }

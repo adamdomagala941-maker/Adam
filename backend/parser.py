@@ -8,7 +8,7 @@ from pypdf import PdfReader
 
 FIELDS = ("name", "cas", "ec", "formula", "molarMass", "signalWord", "hazards", "precautions", "supplemental")
 CODE = re.compile(r"(?<![A-Za-z0-9])(?:EUH\d{3}|[HP]\d{3})(?:\s*\+\s*(?:EUH\d{3}|[HP]\d{3}))*\b")
-SECTION = re.compile(r"(?im)^\s*(?:SEKCJA|SECTION|ROZDZIAŁ)\s+(\d{1,2})\s*[:.\- ]")
+SECTION = re.compile(r"(?im)^[ \t]*(?:SEKCJA|SECTION|ROZDZIAŁ)[ \t]*(\d{1,2})(?!\d|\.\d)[ \t]*(?:[:.\-][ \t]*)?")
 
 
 class DocumentError(ValueError):
@@ -28,7 +28,7 @@ class VisibleText(HTMLParser):
             self.hidden += 1
         if tag == "title":
             self.in_title = True
-        if not self.hidden and tag in {"p", "div", "br", "h1", "h2", "h3", "tr", "li"}:
+        if not self.hidden and tag in {"p", "div", "br", "h1", "h2", "h3", "tr", "li", "td", "th"}:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
@@ -36,7 +36,7 @@ class VisibleText(HTMLParser):
             self.hidden = max(0, self.hidden - 1)
         if tag == "title":
             self.in_title = False
-        if not self.hidden and tag in {"p", "div", "h1", "h2", "h3", "tr", "li"}:
+        if not self.hidden and tag in {"p", "div", "h1", "h2", "h3", "tr", "li", "td", "th"}:
             self.parts.append("\n")
 
     def handle_data(self, data):
@@ -77,14 +77,21 @@ def clean(text: str) -> str:
 
 def section(text: str, number: int) -> str:
     matches = list(SECTION.finditer(text))
+    candidates = []
     for index, match in enumerate(matches):
         if int(match.group(1)) == number:
-            end = matches[index+1].start() if index+1 < len(matches) else len(text)
-            return text[match.end():end]
+            # PDF continuation pages sometimes repeat the same section heading.
+            # Keep that section until an actual different section starts.
+            next_section = next((m for m in matches[index+1:] if int(m.group(1)) != number), None)
+            end = next_section.start() if next_section else len(text)
+            candidates.append(text[match.end():end])
+    if candidates:
+        # The longest occurrence avoids selecting an isolated contents entry.
+        return max(candidates, key=len)
     # A few SDS omit the word SEKCJA / SECTION but retain "2. IDENTYFIKACJA...".
-    heading = re.search(rf"(?im)^\s*{number}\.\s+(?:[A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ /-]{{6,}})", text)
+    heading = re.search(rf"(?im)^[ \t]*{number}[.)][ \t]+(?:[A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ /-]{{6,}})", text)
     if heading:
-        end = re.search(rf"(?im)^\s*{number+1}\.\s+(?:[A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ /-]{{6,}})", text[heading.end():])
+        end = re.search(r"(?im)^[ \t]*(?:[1-9]|1[0-6])[.)][ \t]+(?:[A-ZĄĆĘŁŃÓŚŹŻ][A-ZĄĆĘŁŃÓŚŹŻ /-]{6,})", text[heading.end():])
         return text[heading.end():heading.end()+end.start()] if end else text[heading.end():]
     return ""
 
@@ -135,12 +142,12 @@ def parse_sds(text: str, *, expected_name: str = "", title: str = "", url: str =
         raise DocumentError("Nie rozpoznano sekcji 2 karty charakterystyki. Dokument może być stroną wyszukiwania lub mieć nietypowy układ. Wczytaj bezpośrednio PDF; dane można też wpisać ręcznie.")
     warnings = ["Sprawdź produkt, stężenie i aktualność karty. Odczyt automatyczny wymaga porównania z oryginałem przed drukiem."]
     labeling = two
-    start = re.search(r"(?m)^\s*2\.2\.?\s*", two)
+    start = re.search(r"(?m)^[ \t]*2[ \t]*\.[ \t]*2\.?[ \t]*", two)
     if start:
         labeling = two[start.end():]
     else:
         warnings.append("Nie rozpoznano podsekcji 2.2. Zwroty odczytano z całej sekcji 2; sprawdź dobór zwrotów do etykiety.")
-    end = re.search(r"(?m)^\s*2\.3\.?\s*", labeling)
+    end = re.search(r"(?m)^[ \t]*2[ \t]*\.[ \t]*3\.?[ \t]*", labeling)
     if end:
         labeling = labeling[:end.start()]
     data = {field: "" for field in FIELDS}
